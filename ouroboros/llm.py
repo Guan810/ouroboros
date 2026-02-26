@@ -163,7 +163,18 @@ class LLMClient:
         return os.environ.get("OUROBOROS_MODEL", "gpt-4o")
 
     def available_models(self) -> List[str]:
-        """Return list of available models from env (for switch_model tool schema)."""
+        """Fetch available models from the OpenAI-compatible /models endpoint.
+
+        Falls back to env-configured models if the API call fails.
+        """
+        try:
+            client = self._get_client()
+            resp = client.models.list()
+            return [m.id for m in resp.data]
+        except Exception:
+            log.debug("Failed to fetch models from API, falling back to env config", exc_info=True)
+
+        # Fallback: env-configured models
         main = os.environ.get("OUROBOROS_MODEL", "gpt-4o")
         code = os.environ.get("OUROBOROS_MODEL_CODE", "")
         light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
