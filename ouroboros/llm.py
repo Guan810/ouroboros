@@ -53,6 +53,8 @@ class LLMClient:
             kwargs: Dict[str, Any] = {"api_key": self._api_key}
             if self._base_url:
                 kwargs["base_url"] = self._base_url
+            # Override default User-Agent to avoid 403 from providers that block "OpenAI" header
+            kwargs["default_headers"] = {"User-Agent": "ouroboros/1.0"}
             self._client = OpenAI(**kwargs)
         return self._client
 

@@ -165,6 +165,25 @@ for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
     (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
 REPO_DIR.mkdir(parents=True, exist_ok=True)
 
+# PID lockfile — prevent multiple launcher processes
+_PIDFILE = DRIVE_ROOT / "locks" / "launcher.pid"
+def _acquire_pidlock():
+    """Kill stale launcher if running, then claim the lock."""
+    if _PIDFILE.exists():
+        try:
+            old_pid = int(_PIDFILE.read_text().strip())
+            if old_pid != os.getpid():
+                os.kill(old_pid, 0)
+                log.warning("Another launcher (pid %d) is running — killing it", old_pid)
+                import signal
+                os.kill(old_pid, signal.SIGTERM)
+                time.sleep(1)
+        except (ProcessLookupError, ValueError, OSError):
+            pass
+    _PIDFILE.write_text(str(os.getpid()), encoding="utf-8")
+
+_acquire_pidlock()
+
 # Clear stale owner mailbox files from previous session
 try:
     from ouroboros.owner_inject import get_pending_path
@@ -466,6 +485,7 @@ offset = int(load_state().get("tg_offset") or 0)
 _last_diag_heartbeat_ts = 0.0
 _last_message_ts: float = time.time()  # Start in active mode after restart
 _ACTIVE_MODE_SEC: int = 300  # 5 min of activity = active polling mode
+_active_chat_thread: Optional[threading.Thread] = None  # Track active chat thread
 
 # Auto-start background consciousness (creator's policy: always on by default)
 try:
@@ -669,22 +689,35 @@ while True:
                     send_with_budget(chat_id, "📎 Photo received, but a task is in progress. Send again when I'm free.")
             else:
                 # Dispatch to direct chat handler
-                _consciousness.pause()
-                def _run_task_and_resume(cid, txt, img):
+                # Save offset before spawning thread to prevent re-processing on restart
+                st = load_state()
+                st["tg_offset"] = offset
+                save_state(st)
+
+                # Check if previous chat thread is still alive
+                if _active_chat_thread is not None and _active_chat_thread.is_alive():
+                    if final_text:
+                        agent.inject_message(final_text)
+                    if _batched_image:
+                        send_with_budget(chat_id, "📎 Photo received, but a task is in progress. Send again when I'm free.")
+                else:
+                    _consciousness.pause()
+                    def _run_task_and_resume(cid, txt, img):
+                        try:
+                            handle_chat_direct(cid, txt, img)
+                        finally:
+                            _consciousness.resume()
+                    _t = threading.Thread(
+                        target=_run_task_and_resume,
+                        args=(chat_id, final_text, _batched_image),
+                        daemon=True,
+                    )
                     try:
-                        handle_chat_direct(cid, txt, img)
-                    finally:
+                        _t.start()
+                        _active_chat_thread = _t
+                    except Exception as _te:
+                        log.error("Failed to start chat thread: %s", _te)
                         _consciousness.resume()
-                _t = threading.Thread(
-                    target=_run_task_and_resume,
-                    args=(chat_id, final_text, _batched_image),
-                    daemon=True,
-                )
-                try:
-                    _t.start()
-                except Exception as _te:
-                    log.error("Failed to start chat thread: %s", _te)
-                    _consciousness.resume()  # ensure resume if thread fails to start
 
     st = load_state()
     st["tg_offset"] = offset

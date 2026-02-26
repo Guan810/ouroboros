@@ -124,6 +124,8 @@ def get_running_task_ids() -> List[str]:
 # Chat agent (direct mode)
 # ---------------------------------------------------------------------------
 _chat_agent = None
+_chat_lock = threading.Lock()       # Serialize handle_chat_direct calls
+_auto_resume_done = False           # Prevent duplicate auto_resume_after_restart
 
 
 def _get_chat_agent():
@@ -140,8 +142,13 @@ def _get_chat_agent():
 
 
 def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None) -> None:
-    try:
+    with _chat_lock:
         agent = _get_chat_agent()
+        if agent._busy:
+            log.warning("handle_chat_direct: agent already busy, dropping message")
+            return
+        agent._busy = True
+    try:
         task = {
             "id": uuid.uuid4().hex[:8],
             "type": "task",
@@ -150,15 +157,12 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
             "_is_direct_chat": True,
         }
         if image_data:
-            # image_data is (base64, mime) or (base64, mime, caption)
             task["image_base64"] = image_data[0]
             task["image_mime"] = image_data[1]
             if len(image_data) > 2 and image_data[2]:
                 task["image_caption"] = image_data[2]
-                # Prefer caption as task text if text is empty
                 if not text:
                     task["text"] = image_data[2]
-        # Fallback for truly empty messages
         if not task["text"]:
             task["text"] = "(image attached)" if image_data else ""
         events = agent.handle_task(task)
@@ -166,6 +170,7 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
             get_event_q().put(e)
     except Exception as e:
         import traceback
+        agent._busy = False
         err_msg = f"⚠️ Error: {type(e).__name__}: {e}"
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -194,6 +199,10 @@ def auto_resume_after_restart() -> None:
     Background consciousness will subsume this eventually, but auto-resume is
     needed immediately after a restart so the agent doesn't go silent.
     """
+    global _auto_resume_done
+    if _auto_resume_done:
+        return
+    _auto_resume_done = True
     try:
         st = load_state()
         chat_id = st.get("owner_chat_id")

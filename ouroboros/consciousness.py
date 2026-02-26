@@ -63,6 +63,7 @@ class BackgroundConsciousness:
         self._next_wakeup_sec: float = 300.0
         self._observations: queue.Queue = queue.Queue()
         self._deferred_events: list = []
+        self._state_lock = threading.Lock()  # Protect _paused + _deferred_events
 
         # Budget tracking
         self._bg_spent_usd: float = 0.0
@@ -102,15 +103,17 @@ class BackgroundConsciousness:
 
     def pause(self) -> None:
         """Pause during task execution to avoid budget contention."""
-        self._paused = True
+        with self._state_lock:
+            self._paused = True
 
     def resume(self) -> None:
         """Resume after task completes. Flush any deferred events first."""
-        if self._deferred_events and self._event_queue is not None:
-            for evt in self._deferred_events:
-                self._event_queue.put(evt)
-            self._deferred_events.clear()
-        self._paused = False
+        with self._state_lock:
+            if self._deferred_events and self._event_queue is not None:
+                for evt in self._deferred_events:
+                    self._event_queue.put(evt)
+                self._deferred_events.clear()
+            self._paused = False
         self._wakeup_event.set()
 
     def inject_observation(self, text: str) -> None:
@@ -261,12 +264,13 @@ class BackgroundConsciousness:
                 break
 
             # Forward or defer accumulated events
-            if all_pending_events and self._event_queue is not None:
-                if self._paused:
-                    self._deferred_events.extend(all_pending_events)
-                else:
-                    for evt in all_pending_events:
-                        self._event_queue.put(evt)
+            with self._state_lock:
+                if all_pending_events and self._event_queue is not None:
+                    if self._paused:
+                        self._deferred_events.extend(all_pending_events)
+                    else:
+                        for evt in all_pending_events:
+                            self._event_queue.put(evt)
 
             # Log the thought with round count
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
