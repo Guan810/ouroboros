@@ -25,7 +25,7 @@ from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitiz
 
 log = logging.getLogger(__name__)
 
-# Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
+# Static pricing (per 1M tokens: input, cached, output). Update manually as needed.
 _MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
@@ -49,37 +49,18 @@ _cached_pricing = None
 _pricing_lock = threading.Lock()
 
 def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
-    """
-    Lazy-load pricing. On first call, attempts to fetch from OpenRouter API.
-    Falls back to static pricing if fetch fails.
-    Thread-safe via module-level lock.
-    """
+    """Return static pricing table for cost estimation."""
     global _pricing_fetched, _cached_pricing
 
-    # Fast path: already fetched (read without lock for performance)
     if _pricing_fetched:
         return _cached_pricing or _MODEL_PRICING_STATIC
 
-    # Slow path: fetch pricing (lock required)
     with _pricing_lock:
-        # Double-check after acquiring lock (another thread may have fetched)
         if _pricing_fetched:
             return _cached_pricing or _MODEL_PRICING_STATIC
 
         _pricing_fetched = True
         _cached_pricing = dict(_MODEL_PRICING_STATIC)
-
-        try:
-            from ouroboros.llm import fetch_openrouter_pricing
-            _live = fetch_openrouter_pricing()
-            if _live and len(_live) > 5:
-                _cached_pricing.update(_live)
-        except Exception as e:
-            import logging as _log
-            _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
-            # Reset flag so we retry next time
-            _pricing_fetched = False
-
         return _cached_pricing
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,

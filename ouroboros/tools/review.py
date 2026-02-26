@@ -21,8 +21,6 @@ MAX_MODELS = 10
 # Concurrency limit for parallel requests
 CONCURRENCY_LIMIT = 5
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
 
 def get_tools():
     """Return list of ToolEntry for registry."""
@@ -54,7 +52,7 @@ def get_tools():
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "OpenRouter model identifiers to query "
+                            "Model identifiers to query "
                                 "(e.g. 3 diverse models for good coverage)"
                             ),
                         },
@@ -87,12 +85,12 @@ def _handle_multi_model_review(ctx: ToolContext, content: str = "", prompt: str 
         return json.dumps({"error": f"Review failed: {e}"}, ensure_ascii=False)
 
 
-async def _query_model(client, model, messages, api_key, semaphore):
+async def _query_model(client, model, messages, api_key, api_url, semaphore):
     """Query a single model with semaphore-based concurrency control. Returns (model, response_dict, headers_dict) or (model, error_str, None)."""
     async with semaphore:
         try:
             resp = await client.post(
-                OPENROUTER_URL,
+                api_url,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -146,9 +144,12 @@ async def _multi_model_review_async(content: str, prompt: str, models: list, ctx
     if len(models) == 0:
         return {"error": "At least one model is required"}
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    api_key = os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
-        return {"error": "OPENROUTER_API_KEY not set"}
+        return {"error": "LLM_API_KEY not set"}
+
+    base_url = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    api_url = f"{base_url}/chat/completions"
 
     messages = [
         {"role": "system", "content": prompt},
@@ -158,7 +159,7 @@ async def _multi_model_review_async(content: str, prompt: str, models: list, ctx
     # Query all models with bounded concurrency
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
     async with httpx.AsyncClient() as client:
-        tasks = [_query_model(client, m, messages, api_key, semaphore) for m in models]
+        tasks = [_query_model(client, m, messages, api_key, api_url, semaphore) for m in models]
         results = await asyncio.gather(*tasks)
 
     # Parse and process results
@@ -227,11 +228,10 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
         # Fallback to total_cost field
         elif "usage" in result and "total_cost" in result["usage"]:
             cost = float(result["usage"]["total_cost"])
-        # Finally check headers
+        # Finally check headers for cost
         elif headers_dict:
-            # Case-insensitive search for cost header
             for key, value in headers_dict.items():
-                if key.lower() == "x-openrouter-cost":
+                if "cost" in key.lower():
                     cost = float(value)
                     break
     except (ValueError, TypeError, KeyError):

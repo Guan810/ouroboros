@@ -207,9 +207,6 @@ def save_state(st: Dict[str, Any]) -> None:
 def init_state() -> Dict[str, Any]:
     """
     Initialize state at session start, capturing snapshots for budget drift detection.
-
-    Fetches OpenRouter ground truth and stores session_daily_snapshot and
-    session_spent_snapshot for drift calculation.
     """
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
@@ -218,13 +215,13 @@ def init_state() -> Dict[str, Any]:
         # Capture session snapshots for drift detection
         st["session_spent_snapshot"] = float(st.get("spent_usd") or 0.0)
 
-        # Fetch OpenRouter ground truth to capture total_usd baseline
+        # Fetch provider ground truth to capture total_usd baseline
         ground_truth = check_openrouter_ground_truth()
         if ground_truth is not None:
             st["session_total_snapshot"] = ground_truth["total_usd"]
-            st["openrouter_total_usd"] = ground_truth["total_usd"]
-            st["openrouter_daily_usd"] = ground_truth["daily_usd"]
-            st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            st["provider_total_usd"] = ground_truth["total_usd"]
+            st["provider_daily_usd"] = ground_truth["daily_usd"]
+            st["provider_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         else:
             # If we can't fetch ground truth, use 0 as baseline
             st["session_total_snapshot"] = 0.0
@@ -263,31 +260,12 @@ def budget_remaining(st: Dict[str, Any]) -> float:
 
 def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
     """
-    Call OpenRouter API to get ground truth usage.
+    Placeholder for external usage verification.
 
-    Returns dict with total_usd and daily_usd spent according to OpenRouter, or None on error.
+    Previously called OpenRouter API. Now returns None (no external ground truth).
+    Override this if your provider has a usage API.
     """
-    try:
-        import urllib.request
-        api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        if not api_key:
-            return None
-        req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/auth/key",
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        # OpenRouter API returns usage already in dollars (not cents)
-        usage_total = data.get("data", {}).get("usage", 0)
-        usage_daily = data.get("data", {}).get("usage_daily", 0)
-        return {
-            "total_usd": float(usage_total),
-            "daily_usd": float(usage_daily),
-        }
-    except Exception:
-        log.warning("Failed to fetch OpenRouter ground truth", exc_info=True)
-        return None
+    return None
 
 
 def budget_pct(st: Dict[str, Any]) -> float:
@@ -305,7 +283,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
     Uses a single lock scope for the read-modify-write cycle to prevent
     concurrent writes from losing budget updates.
 
-    Every 50 calls, fetches OpenRouter ground truth for comparison.
+    Every 50 calls, fetches provider ground truth for comparison.
     """
     def _to_float(v: Any, default: float = 0.0) -> float:
         try:
@@ -342,16 +320,16 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
-    # Step 2: HTTP to OpenRouter OUTSIDE the lock (can take up to 10s)
+    # Step 2: Provider ground truth check OUTSIDE the lock
     if should_check_ground_truth:
         ground_truth = check_openrouter_ground_truth()
         if ground_truth is not None:
             lock_fd = acquire_file_lock(STATE_LOCK_PATH)
             try:
                 st = _load_state_unlocked()
-                st["openrouter_total_usd"] = ground_truth["total_usd"]
-                st["openrouter_daily_usd"] = ground_truth["daily_usd"]
-                st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                st["provider_total_usd"] = ground_truth["total_usd"]
+                st["provider_daily_usd"] = ground_truth["daily_usd"]
+                st["provider_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
                 session_total_snap = st.get("session_total_snapshot")
                 session_spent_snap = st.get("session_spent_snapshot")
@@ -378,7 +356,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                                     "or_delta": round(or_delta, 4),
                                     "abs_diff": round(abs_diff, 4),
                                     "spent_calls": st["spent_calls"],
-                                    "note": "High drift expected if OR key is shared or tracking had early bugs",
+                                    "note": "High drift expected if API key is shared or tracking had early bugs",
                                 }
                             )
                         else:
@@ -613,7 +591,7 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
     if drift_pct is not None:
         session_total_snap = st.get("session_total_snapshot")
         session_spent_snap = st.get("session_spent_snapshot")
-        or_total = st.get("openrouter_total_usd")
+        or_total = st.get("provider_total_usd") or st.get("openrouter_total_usd")
 
         if session_total_snap is not None and session_spent_snap is not None and or_total is not None:
             or_delta = or_total - session_total_snap
@@ -622,7 +600,7 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
             drift_icon = " ⚠️" if st.get("budget_drift_alert") else ""
             lines.append(
                 f"budget_drift: {drift_pct:.1f}%{drift_icon} "
-                f"(tracked: ${our_delta:.2f} vs OpenRouter: ${or_delta:.2f})"
+                f"(tracked: ${our_delta:.2f} vs provider: ${or_delta:.2f})"
             )
 
     # Model breakdown
