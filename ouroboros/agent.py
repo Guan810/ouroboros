@@ -388,6 +388,7 @@ class OuroborosAgent:
         start_time = time.time()
         self._task_started_ts = start_time
         self._last_progress_ts = start_time
+        self._last_progress_text = ""  # Reset progress dedup
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
         self._current_task_type = str(task.get("type") or "")
@@ -597,6 +598,11 @@ class OuroborosAgent:
         self._last_progress_ts = time.time()
         if self._event_queue is None or self._current_chat_id is None:
             return
+        # Deduplicate: skip if identical or near-identical to last progress
+        normalized = text.strip()[:120]
+        if hasattr(self, '_last_progress_text') and self._last_progress_text == normalized:
+            return
+        self._last_progress_text = normalized
         try:
             self._event_queue.put({
                 "type": "send_message", "chat_id": self._current_chat_id,
